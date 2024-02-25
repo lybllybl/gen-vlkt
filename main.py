@@ -15,6 +15,8 @@ from datasets import build_dataset
 from engine import train_one_epoch, evaluate_hoi
 from models import build_model
 import os
+import ssl
+ssl._create_default_https_context = ssl._create_unverified_context
 
 
 def get_args_parser():
@@ -301,6 +303,11 @@ def main(args):
     if args.eval:
         test_stats = evaluate_hoi(args.dataset_file, model, postprocessors, data_loader_val,
                                   args.subject_category_id, device, args)
+
+        log_stats = {**{f'test_{k}': v for k, v in test_stats.items()}}
+        if args.output_dir and utils.is_main_process():
+            with (output_dir / "log.txt").open("a") as f:
+                f.write(json.dumps(log_stats) + "\n")
         return
 
     print("Start training")
@@ -366,6 +373,7 @@ def main(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('GEN VLKT training and evaluation script', parents=[get_args_parser()])
     args = parser.parse_args()
+    args.json_file = args.output_dir + '/' + args.json_file
     if args.output_dir:
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     main(args)
