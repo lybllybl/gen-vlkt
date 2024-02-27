@@ -19,26 +19,25 @@ class HungarianMatcherHOI(nn.Module):
     @torch.no_grad()
     def forward(self, outputs, targets):
         bs, num_queries = outputs['pred_sub_boxes'].shape[:2]
-        if 'pred_hoi_logits' in outputs.keys():
-            out_hoi_prob = outputs['pred_hoi_logits'].flatten(0, 1).sigmoid()
-            tgt_hoi_labels = torch.cat([v['hoi_labels'] for v in targets])
-            tgt_hoi_labels_permute = tgt_hoi_labels.permute(1, 0)
-            cost_hoi_class = -(out_hoi_prob.matmul(tgt_hoi_labels_permute) / \
-                               (tgt_hoi_labels_permute.sum(dim=0, keepdim=True) + 1e-4) + \
-                               (1 - out_hoi_prob).matmul(1 - tgt_hoi_labels_permute) / \
-                               ((1 - tgt_hoi_labels_permute).sum(dim=0, keepdim=True) + 1e-4)) / 2
-            cost_hoi_class = self.cost_hoi_class * cost_hoi_class
-        else:
 
-            out_verb_prob = outputs['pred_verb_logits'].flatten(0, 1).sigmoid()
-            tgt_verb_labels = torch.cat([v['verb_labels'] for v in targets])
-            tgt_verb_labels_permute = tgt_verb_labels.permute(1, 0)
-            cost_verb_class = -(out_verb_prob.matmul(tgt_verb_labels_permute) / \
-                                (tgt_verb_labels_permute.sum(dim=0, keepdim=True) + 1e-4) + \
-                                (1 - out_verb_prob).matmul(1 - tgt_verb_labels_permute) / \
-                                ((1 - tgt_verb_labels_permute).sum(dim=0, keepdim=True) + 1e-4)) / 2
+        out_hoi_prob = outputs['pred_hoi_logits'].flatten(0, 1).sigmoid()
+        tgt_hoi_labels = torch.cat([v['hoi_labels'] for v in targets])
+        tgt_hoi_labels_permute = tgt_hoi_labels.permute(1, 0)
+        cost_hoi_class = -(out_hoi_prob.matmul(tgt_hoi_labels_permute) / \
+                           (tgt_hoi_labels_permute.sum(dim=0, keepdim=True) + 1e-4) + \
+                           (1 - out_hoi_prob).matmul(1 - tgt_hoi_labels_permute) / \
+                           ((1 - tgt_hoi_labels_permute).sum(dim=0, keepdim=True) + 1e-4)) / 2
+        cost_hoi_class = self.cost_hoi_class * cost_hoi_class
 
-            cost_hoi_class = self.cost_verb_class * cost_verb_class
+        out_verb_prob = outputs['pred_verb_logits'].flatten(0, 1).sigmoid()
+        tgt_verb_labels = torch.cat([v['verb_labels'] for v in targets])
+        tgt_verb_labels_permute = tgt_verb_labels.permute(1, 0)
+        cost_verb_class = -(out_verb_prob.matmul(tgt_verb_labels_permute) / \
+                            (tgt_verb_labels_permute.sum(dim=0, keepdim=True) + 1e-4) + \
+                            (1 - out_verb_prob).matmul(1 - tgt_verb_labels_permute) / \
+                            ((1 - tgt_verb_labels_permute).sum(dim=0, keepdim=True) + 1e-4)) / 2
+        cost_verb_class = self.cost_verb_class * cost_verb_class
+
         tgt_obj_labels = torch.cat([v['obj_labels'] for v in targets])
         out_obj_prob = outputs['pred_obj_logits'].flatten(0, 1).softmax(-1)
         cost_obj_class = -out_obj_prob[:, tgt_obj_labels]
@@ -64,7 +63,8 @@ class HungarianMatcherHOI(nn.Module):
             cost_giou = torch.stack((cost_sub_giou, cost_obj_giou)).max(dim=0)[0]
 
         C = self.cost_hoi_class * cost_hoi_class + self.cost_bbox * cost_bbox + \
-            self.cost_giou * cost_giou + self.cost_obj_class * cost_obj_class
+            self.cost_giou * cost_giou + self.cost_obj_class * cost_obj_class + \
+            self.cost_verb_class * cost_verb_class
 
         C = C.view(bs, num_queries, -1).cpu()
 

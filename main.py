@@ -320,8 +320,18 @@ def main(args):
         train_stats = train_one_epoch(
             model, criterion, data_loader_train, optimizer, device, epoch, args.clip_max_norm)
         lr_scheduler.step()
-        if epoch == args.epochs - 1:
-            checkpoint_path = os.path.join(output_dir, 'checkpoint_last.pth')
+
+        checkpoint_path = os.path.join(output_dir, 'checkpoint_last.pth')
+        utils.save_on_master({
+            'model': model_without_ddp.state_dict(),
+            'optimizer': optimizer.state_dict(),
+            'lr_scheduler': lr_scheduler.state_dict(),
+            'epoch': epoch,
+            'args': args,
+        }, checkpoint_path)
+
+        if epoch == args.lr_drop - 1:
+            checkpoint_path = os.path.join(output_dir, str(args.lr_drop-1) + '.pth')
             utils.save_on_master({
                 'model': model_without_ddp.state_dict(),
                 'optimizer': optimizer.state_dict(),

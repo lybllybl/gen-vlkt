@@ -33,6 +33,7 @@ class GEN_VLKT(nn.Module):
         self.query_embed_o = nn.Embedding(num_queries, hidden_dim)
         self.pos_guided_embedd = nn.Embedding(num_queries, hidden_dim)
         self.hum_bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3)
+        self.hum_action_embed = nn.Linear(hidden_dim, args.num_verb_classes)
         self.obj_bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3)
         self.input_proj = nn.Conv2d(backbone.num_channels, hidden_dim, kernel_size=1)
         self.backbone = backbone
@@ -128,6 +129,7 @@ class GEN_VLKT(nn.Module):
                                                 pos[-1])[:3]
 
         outputs_sub_coord = self.hum_bbox_embed(h_hs).sigmoid()
+        outputs_sub_verb = self.hum_action_embed(h_hs)
         outputs_obj_coord = self.obj_bbox_embed(o_hs).sigmoid()
 
         if self.args.with_obj_clip_label:
@@ -154,7 +156,8 @@ class GEN_VLKT(nn.Module):
             outputs_hoi_class = self.hoi_class_embedding(inter_hs)
 
         out = {'pred_hoi_logits': outputs_hoi_class[-1], 'pred_obj_logits': outputs_obj_class[-1],
-               'pred_sub_boxes': outputs_sub_coord[-1], 'pred_obj_boxes': outputs_obj_coord[-1]}
+               'pred_sub_boxes': outputs_sub_coord[-1], 'pred_obj_boxes': outputs_obj_coord[-1],
+               'pred_verb_logits': outputs_sub_verb[1]}
 
         if self.args.with_mimic:
             out['inter_memory'] = outputs_inter_hs[-1]
@@ -166,18 +169,19 @@ class GEN_VLKT(nn.Module):
 
             out['aux_outputs'] = self._set_aux_loss_triplet(outputs_hoi_class, outputs_obj_class,
                                                             outputs_sub_coord, outputs_obj_coord,
-                                                            aux_mimic)
+                                                            outputs_sub_verb, aux_mimic)
 
         return out
 
     @torch.jit.unused
     def _set_aux_loss_triplet(self, outputs_hoi_class, outputs_obj_class,
-                              outputs_sub_coord, outputs_obj_coord, outputs_inter_hs=None):
+                              outputs_sub_coord, outputs_obj_coord, outputs_sub_verb, outputs_inter_hs=None):
 
         aux_outputs = {'pred_hoi_logits': outputs_hoi_class[-self.dec_layers: -1],
                        'pred_obj_logits': outputs_obj_class[-self.dec_layers: -1],
                        'pred_sub_boxes': outputs_sub_coord[-self.dec_layers: -1],
-                       'pred_obj_boxes': outputs_obj_coord[-self.dec_layers: -1]}
+                       'pred_obj_boxes': outputs_obj_coord[-self.dec_layers: -1],
+                       'pred_verb_logits': outputs_sub_verb[-self.dec_layers: -1]}
         if outputs_inter_hs is not None:
             aux_outputs['inter_memory'] = outputs_inter_hs[-self.dec_layers: -1]
         outputs_auxes = []
@@ -261,7 +265,7 @@ class SetCriterionHOI(nn.Module):
 
         src_logits = src_logits.sigmoid()
         loss_verb_ce = self._neg_loss(src_logits, target_classes, weights=None, alpha=self.alpha)
-        losses = {'loss_verb_ce': loss_verb_ce}
+        losses = {'loss_sub_verb': loss_verb_ce}
         return losses
 
     def loss_hoi_labels(self, outputs, targets, indices, num_interactions, topk=5):
@@ -368,6 +372,7 @@ class SetCriterionHOI(nn.Module):
             loss_map = {
                 'hoi_labels': self.loss_hoi_labels,
                 'obj_labels': self.loss_obj_labels,
+                'sub_verb_labels': self.loss_verb_labels,
                 'sub_obj_boxes': self.loss_sub_obj_boxes,
                 'feats_mimic': self.mimic_loss
             }
@@ -487,6 +492,7 @@ def build(args):
     weight_dict['loss_obj_bbox'] = args.bbox_loss_coef
     weight_dict['loss_sub_giou'] = args.giou_loss_coef
     weight_dict['loss_obj_giou'] = args.giou_loss_coef
+    weight_dict['loss_sub_verb'] = args.verb_loss_coef
     if args.with_mimic:
         weight_dict['loss_feat_mimic'] = args.mimic_loss_coef
 
@@ -495,7 +501,7 @@ def build(args):
         for i in range(args.dec_layers - 1):
             aux_weight_dict.update({k + f'_{i}': v for k, v in weight_dict.items()})
         weight_dict.update(aux_weight_dict)
-    losses = ['hoi_labels', 'obj_labels', 'sub_obj_boxes']
+    losses = ['hoi_labels', 'obj_labels', 'sub_obj_boxes', 'sub_verb_labels']
     if args.with_mimic:
         losses.append('feats_mimic')
 
