@@ -34,6 +34,7 @@ class GEN_VLKT(nn.Module):
         self.pos_guided_embedd = nn.Embedding(num_queries, hidden_dim)
         self.hum_bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3)
         self.hum_action_embed = nn.Linear(hidden_dim, args.num_verb_classes)
+        self.pair_embed = nn.Linear(hidden_dim, 1)
         self.obj_bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3)
         self.input_proj = nn.Conv2d(backbone.num_channels, hidden_dim, kernel_size=1)
         self.backbone = backbone
@@ -132,6 +133,9 @@ class GEN_VLKT(nn.Module):
         outputs_sub_verb = self.hum_action_embed(h_hs)
         outputs_obj_coord = self.obj_bbox_embed(o_hs).sigmoid()
 
+        ho_hs = (h_hs + o_hs) / 2.0
+        outputs_pair_class = self.pair_embed(ho_hs).squeeze(-1)
+
         if self.args.with_obj_clip_label:
             obj_logit_scale = self.obj_logit_scale.exp()
             o_hs = self.obj_class_fc(o_hs)
@@ -157,7 +161,7 @@ class GEN_VLKT(nn.Module):
 
         out = {'pred_hoi_logits': outputs_hoi_class[-1], 'pred_obj_logits': outputs_obj_class[-1],
                'pred_sub_boxes': outputs_sub_coord[-1], 'pred_obj_boxes': outputs_obj_coord[-1],
-               'pred_verb_logits': outputs_sub_verb[1]}
+               'pred_verb_logits': outputs_sub_verb[1], 'pred_pair_logits': outputs_pair_class[-1]}
 
         if self.args.with_mimic:
             out['inter_memory'] = outputs_inter_hs[-1]
@@ -169,19 +173,21 @@ class GEN_VLKT(nn.Module):
 
             out['aux_outputs'] = self._set_aux_loss_triplet(outputs_hoi_class, outputs_obj_class,
                                                             outputs_sub_coord, outputs_obj_coord,
-                                                            outputs_sub_verb, aux_mimic)
+                                                            outputs_sub_verb, outputs_pair_class,
+                                                            aux_mimic)
 
         return out
 
     @torch.jit.unused
-    def _set_aux_loss_triplet(self, outputs_hoi_class, outputs_obj_class,
-                              outputs_sub_coord, outputs_obj_coord, outputs_sub_verb, outputs_inter_hs=None):
+    def _set_aux_loss_triplet(self, outputs_hoi_class, outputs_obj_class,outputs_sub_coord, outputs_obj_coord,
+                              outputs_sub_verb, outputs_pair_class, outputs_inter_hs=None):
 
         aux_outputs = {'pred_hoi_logits': outputs_hoi_class[-self.dec_layers: -1],
                        'pred_obj_logits': outputs_obj_class[-self.dec_layers: -1],
                        'pred_sub_boxes': outputs_sub_coord[-self.dec_layers: -1],
                        'pred_obj_boxes': outputs_obj_coord[-self.dec_layers: -1],
-                       'pred_verb_logits': outputs_sub_verb[-self.dec_layers: -1]}
+                       'pred_verb_logits': outputs_sub_verb[-self.dec_layers: -1],
+                       'pred_pair_logits': outputs_pair_class[-self.dec_layers: -1]}
         if outputs_inter_hs is not None:
             aux_outputs['inter_memory'] = outputs_inter_hs[-self.dec_layers: -1]
         outputs_auxes = []
@@ -295,6 +301,29 @@ class SetCriterionHOI(nn.Module):
             rel_labels_error)).to(src_logits.device).float()
         return losses
 
+    def loss_pair_labels(self, outputs, targets, indices, num_interactions):
+        assert 'pred_sub_boxes' in outputs and 'pred_obj_boxes' in outputs
+        src_scores = outputs['pred_pair_logits']
+        labels = torch.zeros_like(src_scores, device=src_scores.device)
+
+        batch = len(src_scores)
+        for idx in range(batch):
+            src_sub_boxes = box_cxcywh_to_xyxy(outputs['pred_sub_boxes'][idx])
+            src_obj_boxes = box_cxcywh_to_xyxy(outputs['pred_obj_boxes'][idx])
+            target_sub_boxes = box_cxcywh_to_xyxy(targets[idx]['sub_boxes'])
+            target_obj_boxes = box_cxcywh_to_xyxy(targets[idx]['obj_boxes'])
+
+            all_iou = torch.min(generalized_box_iou(src_sub_boxes, target_sub_boxes),
+                                generalized_box_iou(src_obj_boxes, target_obj_boxes))
+            max_indices = torch.max(all_iou, dim=0)[1]
+            labels[idx][max_indices] = 1
+
+        src_scores = _sigmoid(src_scores)
+        loss_pair_ce = self._neg_loss(src_scores, labels, weights=None, alpha=self.alpha)
+        return dict(loss_pair_labels=loss_pair_ce)
+
+
+
     def loss_sub_obj_boxes(self, outputs, targets, indices, num_interactions):
         assert 'pred_sub_boxes' in outputs and 'pred_obj_boxes' in outputs
         idx = self._get_src_permutation_idx(indices)
@@ -374,7 +403,8 @@ class SetCriterionHOI(nn.Module):
                 'obj_labels': self.loss_obj_labels,
                 'sub_verb_labels': self.loss_verb_labels,
                 'sub_obj_boxes': self.loss_sub_obj_boxes,
-                'feats_mimic': self.mimic_loss
+                'feats_mimic': self.mimic_loss,
+                'pair_labels': self.loss_pair_labels,
             }
         else:
             loss_map = {
@@ -388,6 +418,18 @@ class SetCriterionHOI(nn.Module):
 
     def forward(self, outputs, targets):
         outputs_without_aux = {k: v for k, v in outputs.items() if k != 'aux_outputs'}
+
+        batch = len(outputs['pred_hoi_logits'])
+        for idx in range(batch):
+            src_sub_boxes = box_cxcywh_to_xyxy(outputs['pred_sub_boxes'][idx])
+            src_obj_boxes = box_cxcywh_to_xyxy(outputs['pred_obj_boxes'][idx])
+            target_sub_boxes = box_cxcywh_to_xyxy(targets[idx]['sub_boxes'])
+            target_obj_boxes = box_cxcywh_to_xyxy(targets[idx]['obj_boxes'])
+
+            all_iou = torch.min(generalized_box_iou(src_sub_boxes, target_sub_boxes),
+                                generalized_box_iou(src_obj_boxes, target_obj_boxes))
+            max_indices = torch.max(all_iou, dim=0)[1]
+            targets[idx].update(dict(pair_match_indices=max_indices))
 
         # Retrieve the matching between the outputs of the last layer and the targets
         indices = self.matcher(outputs_without_aux, targets)
@@ -493,6 +535,7 @@ def build(args):
     weight_dict['loss_sub_giou'] = args.giou_loss_coef
     weight_dict['loss_obj_giou'] = args.giou_loss_coef
     weight_dict['loss_sub_verb'] = args.verb_loss_coef
+    weight_dict['loss_pair_labels'] = args.pair_loss_coef
     if args.with_mimic:
         weight_dict['loss_feat_mimic'] = args.mimic_loss_coef
 
@@ -501,7 +544,7 @@ def build(args):
         for i in range(args.dec_layers - 1):
             aux_weight_dict.update({k + f'_{i}': v for k, v in weight_dict.items()})
         weight_dict.update(aux_weight_dict)
-    losses = ['hoi_labels', 'obj_labels', 'sub_obj_boxes', 'sub_verb_labels']
+    losses = ['hoi_labels', 'obj_labels', 'sub_obj_boxes', 'sub_verb_labels', 'pair_labels']
     if args.with_mimic:
         losses.append('feats_mimic')
 

@@ -94,6 +94,8 @@ def get_args_parser():
                         help="Verb class coefficient in the matching cost")
     parser.add_argument('--set_cost_hoi', default=1, type=float,
                         help="Hoi class coefficient")
+    parser.add_argument('--set_cost_pair', default=1, type=float,
+                        help="Hoi class coefficient")
 
     # * Loss coefficients
     parser.add_argument('--mask_loss_coef', default=1, type=float)
@@ -104,6 +106,7 @@ def get_args_parser():
     parser.add_argument('--verb_loss_coef', default=2, type=float)
     parser.add_argument('--hoi_loss_coef', default=2, type=float)
     parser.add_argument('--mimic_loss_coef', default=20, type=float)
+    parser.add_argument('--pair_loss_coef', default=2, type=float)
     parser.add_argument('--alpha', default=0.5, type=float, help='focal loss alpha')
     parser.add_argument('--eos_coef', default=0.1, type=float,
                         help="Relative classification weight of the no-object class")

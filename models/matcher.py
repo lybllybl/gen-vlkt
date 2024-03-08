@@ -7,13 +7,14 @@ from util.box_ops import box_cxcywh_to_xyxy, generalized_box_iou
 class HungarianMatcherHOI(nn.Module):
 
     def __init__(self, cost_obj_class: float = 1, cost_verb_class: float = 1, cost_bbox: float = 1,
-                 cost_giou: float = 1, cost_hoi_class: float = 1):
+                 cost_giou: float = 1, cost_hoi_class: float = 1, cost_pair_class: float = 1):
         super().__init__()
         self.cost_obj_class = cost_obj_class
         self.cost_verb_class = cost_verb_class
         self.cost_hoi_class = cost_hoi_class
         self.cost_bbox = cost_bbox
         self.cost_giou = cost_giou
+        self.cost_pair_class = cost_pair_class
         assert cost_obj_class != 0 or cost_verb_class != 0 or cost_bbox != 0 or cost_giou != 0, 'all costs cant be 0'
 
     @torch.no_grad()
@@ -69,11 +70,17 @@ class HungarianMatcherHOI(nn.Module):
         C = C.view(bs, num_queries, -1).cpu()
 
         sizes = [len(v['sub_boxes']) for v in targets]
-        indices = [linear_sum_assignment(c[i]) for i, c in enumerate(C.split(sizes, -1))]
+        out_pair_prob = outputs['pred_pair_logits'].sigmoid().cpu()
+        indices = []
+        for i, c in enumerate(C.split(sizes, -1)):
+            pair_match_indices = targets[i]['pair_match_indices']
+            for j, idx in enumerate(pair_match_indices):
+                c[i][idx][j] += -self.cost_pair_class * out_pair_prob[i][idx]
+            indices.append(linear_sum_assignment(c[i]))
         return [(torch.as_tensor(i, dtype=torch.int64), torch.as_tensor(j, dtype=torch.int64)) for i, j in indices]
 
 
 def build_matcher(args):
     return HungarianMatcherHOI(cost_obj_class=args.set_cost_obj_class, cost_verb_class=args.set_cost_verb_class,
                                cost_bbox=args.set_cost_bbox, cost_giou=args.set_cost_giou,
-                               cost_hoi_class=args.set_cost_hoi)
+                               cost_hoi_class=args.set_cost_hoi, cost_pair_class=args.set_cost_pair)
