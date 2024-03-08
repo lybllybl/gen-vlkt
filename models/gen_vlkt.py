@@ -304,25 +304,14 @@ class SetCriterionHOI(nn.Module):
     def loss_pair_labels(self, outputs, targets, indices, num_interactions):
         assert 'pred_sub_boxes' in outputs and 'pred_obj_boxes' in outputs
         src_scores = outputs['pred_pair_logits']
+
+        idx = self._get_src_permutation_idx(indices)
         labels = torch.zeros_like(src_scores, device=src_scores.device)
-
-        batch = len(src_scores)
-        for idx in range(batch):
-            src_sub_boxes = box_cxcywh_to_xyxy(outputs['pred_sub_boxes'][idx])
-            src_obj_boxes = box_cxcywh_to_xyxy(outputs['pred_obj_boxes'][idx])
-            target_sub_boxes = box_cxcywh_to_xyxy(targets[idx]['sub_boxes'])
-            target_obj_boxes = box_cxcywh_to_xyxy(targets[idx]['obj_boxes'])
-
-            all_iou = torch.min(generalized_box_iou(src_sub_boxes, target_sub_boxes),
-                                generalized_box_iou(src_obj_boxes, target_obj_boxes))
-            max_indices = torch.max(all_iou, dim=0)[1]
-            labels[idx][max_indices] = 1
+        labels[idx] = 1
 
         src_scores = _sigmoid(src_scores)
         loss_pair_ce = self._neg_loss(src_scores, labels, weights=None, alpha=self.alpha)
         return dict(loss_pair_labels=loss_pair_ce)
-
-
 
     def loss_sub_obj_boxes(self, outputs, targets, indices, num_interactions):
         assert 'pred_sub_boxes' in outputs and 'pred_obj_boxes' in outputs
@@ -426,9 +415,11 @@ class SetCriterionHOI(nn.Module):
             target_sub_boxes = box_cxcywh_to_xyxy(targets[idx]['sub_boxes'])
             target_obj_boxes = box_cxcywh_to_xyxy(targets[idx]['obj_boxes'])
 
-            all_iou = torch.min(generalized_box_iou(src_sub_boxes, target_sub_boxes),
-                                generalized_box_iou(src_obj_boxes, target_obj_boxes))
-            max_indices = torch.max(all_iou, dim=0)[1]
+            max_indices = torch.tensor([])
+            if len(target_obj_boxes) != 0:
+                all_iou = torch.min(generalized_box_iou(src_sub_boxes, target_sub_boxes),
+                                    generalized_box_iou(src_obj_boxes, target_obj_boxes))
+                max_indices = torch.max(all_iou, dim=0)[1]
             targets[idx].update(dict(pair_match_indices=max_indices))
 
         # Retrieve the matching between the outputs of the last layer and the targets
